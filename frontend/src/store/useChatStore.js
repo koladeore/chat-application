@@ -9,12 +9,19 @@ export const useChatStore = create((set, get) => ({
   selectedUser: null,
   isUsersLoading: false,
   isMessagesLoading: false,
+  unreadCounts: {},
 
   getUsers: async () => {
     set({ isUsersLoading: true });
     try {
       const res = await axiosInstance.get("/messages/users");
-      set({ users: res.data });
+      const users = res.data.sort((a, b) => new Date(b.lastMessageTimestamp) - new Date(a.lastMessageTimestamp));
+    // Populate unreadCounts state
+    const unreadCounts = users.reduce((acc, user) => {
+      acc[user._id] = user.unreadCount;
+      return acc;
+    }, {});
+    set({ users, unreadCounts });
     } catch (error) {
       toast.error(error.response.data.message);
     } finally {
@@ -27,6 +34,12 @@ export const useChatStore = create((set, get) => ({
     try {
       const res = await axiosInstance.get(`/messages/${userId}`);
       set({ messages: res.data });
+      // Mark messages as read for this user
+      await axiosInstance.put(`/messages/mark-as-read/${userId}`);
+       // Update unread counts
+       set((state) => ({
+        unreadCounts: { ...state.unreadCounts, [userId]: 0 },
+      }));
     } catch (error) {
       toast.error(error.response.data.message);
     } finally {
@@ -44,18 +57,30 @@ export const useChatStore = create((set, get) => ({
   },
 
   subscribeToMessages: () => {
-    const { selectedUser } = get();
-    if (!selectedUser) return;
-
     const socket = useAuthStore.getState().socket;
-
     socket.on("newMessage", (newMessage) => {
-      const isMessageSentFromSelectedUser = newMessage.senderId === selectedUser._id;
-      if (!isMessageSentFromSelectedUser) return;
+      set((state) => {
+        const { unreadCounts, selectedUser } = state;
+        const senderId = newMessage.senderId;
 
-      set({
-        messages: [...get().messages, newMessage],
+        if (selectedUser && senderId === selectedUser._id) {
+          // Message from the active conversation
+          return { messages: [...state.messages, newMessage] };
+        }
+
+        // Update unread count
+        return {
+          messages: [...state.messages],
+          unreadCounts: {
+            ...unreadCounts,
+            [senderId]: (unreadCounts[senderId] || 0) + 1,
+          },
+        };
       });
+    });
+    // Listen for user refresh event
+    socket.on("refreshUsers", async () => {
+      await get().getUsers();
     });
   },
 
